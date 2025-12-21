@@ -1,12 +1,12 @@
 # Photo(s) to Ultra-High Quality PDF
 
-This is a simple Windows desktop app that turns your photo(s) into a PDF.
-
 <div align="center">
 
 ![](https://imgur.com/RHkQVO1.png)
 
 </div>
+
+This is a simple Windows desktop app that turns your photo(s) into a PDF.
 
 Think of it like this:
 
@@ -23,13 +23,15 @@ It tries to keep your photos looking as good as possible.
 - This project folder (the one that contains:
   - `Photo Converter to PDF.py`
   - `requirements.txt`
-  - maybe a `.venv` folder)
+  - zipped `venv.rar` file)
 
 ## How to run it (2 ways)
 
-### Way A (recommended): Run with the `.venv` you are uploading
+### Way A (recommended): Run with the `.venv` which is zipped into the venv.rar file
 
-If your project has a `.venv` folder inside it, do this:
+STEP 1: unzip the venv.rar then place the `.venv` in the project folder.
+
+Now, your project has a `.venv` folder inside it, do this:
 
 1. Open PowerShell in the project folder
 
@@ -42,7 +44,7 @@ If your project has a `.venv` folder inside it, do this:
 3. Start the app:
 
 ```powershell
-python "Photo Converter to PDF.py"
+python -u "Photo Converter to PDF.py"
 ```
 
 ### Way B: Install the libraries and run
@@ -50,6 +52,14 @@ python "Photo Converter to PDF.py"
 If you do NOT have `.venv` (or it doesn’t work), do this:
 
 1. Open PowerShell in the project folder
+
+```powershell
+python -m venv venv
+```
+
+```powershell
+.\venv\Scripts\Activate.ps1
+```
 
 2. Install the needed libraries:
 
@@ -60,10 +70,10 @@ pip install -r requirements.txt
 3. Start the app:
 
 ```powershell
-python "Photo Converter to PDF.py"
+python -u "Photo Converter to PDF.py"
 ```
 
-## How to use the app (like a kid-friendly checklist)
+## How to use the app
 
 1. Click **Add…**
 
@@ -90,7 +100,7 @@ python "Photo Converter to PDF.py"
    - If you don’t know what these mean, you can keep the defaults.
 
 6. Click **Convert**
-   - You will see progress.
+   - You will see progress with auto_dip value.
    - Click **Cancel** if you want to stop.
 
 ## Features (what every button/option really does)
@@ -123,6 +133,8 @@ Example:
 
 Here is a simple guide:
 
+<div align="center">
+
 | Use case                   | Best DPI        |
 | -------------------------- | --------------- |
 | Books / PDFs / assignments | **300**         |
@@ -130,6 +142,8 @@ Here is a simple guide:
 | Photos (normal print)      | **300**         |
 | Diagrams, line art         | **600**         |
 | Web / screen only          | **300 or less** |
+
+</div>
 
 Simple rule:
 
