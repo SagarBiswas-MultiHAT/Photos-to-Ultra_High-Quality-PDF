@@ -15,6 +15,11 @@ from reportlab.lib.pagesizes import A4, letter
 from reportlab.pdfgen import canvas
 
 try:
+    import fitz  # PyMuPDF
+except Exception:
+    fitz = None
+
+try:
     import img2pdf  # type: ignore
 except Exception:
     img2pdf = None
@@ -269,8 +274,13 @@ class ImageToPDFApp:
         ttk.Button(buttons, text="Clear", command=self.clear_all).grid(row=0, column=4, sticky="ew", padx=(0, 6))
         ttk.Button(buttons, text="Sort A→Z", command=self.sort_images).grid(row=0, column=5, sticky="ew")
 
+        tools = ttk.Frame(left)
+        tools.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        tools.columnconfigure(0, weight=1)
+        ttk.Button(tools, text="PDF → Photos…", command=self.open_pdf_to_photos).grid(row=0, column=0, sticky="w")
+
         self.summary_label = ttk.Label(left, text="No files selected.")
-        self.summary_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.summary_label.grid(row=3, column=0, sticky="w", pady=(8, 0))
 
         # Right pane: options
         right = ttk.Frame(main)
@@ -411,6 +421,15 @@ class ImageToPDFApp:
 
         self._refresh_output_fields()
         self._refresh_page_fields()
+
+    def open_pdf_to_photos(self) -> None:
+        if fitz is None:
+            messagebox.showwarning(
+                "PDF engine not installed",
+                "To convert PDF pages to photos, install 'PyMuPDF'.\n\nRun: pip install -r requirements.txt",
+            )
+            return
+        PDFToPhotosWindow(self.root)
 
     def _set_idle_state(self) -> None:
         self.cancel_button.state(["disabled"])
@@ -1060,6 +1079,384 @@ class ImageToPDFApp:
                     p.unlink(missing_ok=True)
                 except Exception:
                     pass
+
+
+class PDFToPhotosWindow:
+    def __init__(self, parent: tk.Tk):
+        self.window = tk.Toplevel(parent)
+        self.window.title("PDF to Photos")
+        self.window.minsize(720, 440)
+
+        # Helps keep this window associated with the main app on Windows,
+        # and makes focus behavior after file dialogs more predictable.
+        try:
+            self.window.transient(parent)
+        except Exception:
+            pass
+
+        self._pdfs: List[Path] = []
+        self._worker_thread: Optional[threading.Thread] = None
+        self._events: "queue.Queue[tuple]" = queue.Queue()
+        self._stop_requested = False
+
+        self._build_ui()
+        self._set_idle_state()
+        self._poll_events()
+
+        self._bring_to_front()
+
+    def _bring_to_front(self) -> None:
+        # File dialogs can steal focus; force this window back on top.
+        try:
+            self.window.deiconify()
+            self.window.lift()
+            self.window.focus_force()
+
+            # Temporary topmost toggle is a common Tk workaround on Windows.
+            self.window.attributes("-topmost", True)
+            self.window.after(10, lambda: self.window.attributes("-topmost", False))
+        except Exception:
+            pass
+
+    def _build_ui(self) -> None:
+        self.window.columnconfigure(0, weight=1)
+        self.window.rowconfigure(0, weight=1)
+
+        container = ttk.Frame(self.window, padding=12)
+        container.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        main = ttk.Frame(container)
+        main.grid(row=0, column=0, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.columnconfigure(1, weight=0)
+        main.rowconfigure(0, weight=1)
+
+        left = ttk.LabelFrame(main, text="Selected PDFs", padding=10)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=1)
+
+        list_frame = ttk.Frame(left)
+        list_frame.grid(row=0, column=0, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        self.listbox = tk.Listbox(list_frame, activestyle="dotbox", selectmode=tk.EXTENDED)
+        self.listbox.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.listbox.configure(yscrollcommand=scroll.set)
+
+        buttons = ttk.Frame(left)
+        buttons.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        for i in range(4):
+            buttons.columnconfigure(i, weight=1)
+
+        ttk.Button(buttons, text="Add…", command=self.add_pdfs).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(buttons, text="Remove", command=self.remove_selected).grid(row=0, column=1, sticky="ew", padx=(0, 6))
+        ttk.Button(buttons, text="Clear", command=self.clear_all).grid(row=0, column=2, sticky="ew", padx=(0, 6))
+        ttk.Button(buttons, text="Open output folder", command=self.open_output_folder).grid(row=0, column=3, sticky="ew")
+
+        self.summary_label = ttk.Label(left, text="No files selected.")
+        self.summary_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
+
+        right = ttk.Frame(main)
+        right.grid(row=0, column=1, sticky="ns")
+
+        export = ttk.LabelFrame(right, text="Export", padding=10)
+        export.grid(row=0, column=0, sticky="ew")
+        export.columnconfigure(0, weight=1)
+
+        self.output_folder_var = tk.StringVar(value="")
+        folder_row = ttk.Frame(export)
+        folder_row.grid(row=0, column=0, sticky="ew")
+        folder_row.columnconfigure(0, weight=1)
+        ttk.Label(folder_row, text="Output folder:").grid(row=0, column=0, sticky="w")
+        self.folder_entry = ttk.Entry(folder_row, textvariable=self.output_folder_var, width=42)
+        self.folder_entry.grid(row=1, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(folder_row, text="Browse…", command=self.browse_output_folder).grid(row=1, column=1, sticky="ew")
+
+        quality = ttk.LabelFrame(right, text="Quality", padding=10)
+        quality.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        quality.columnconfigure(0, weight=1)
+
+        self.format_var = tk.StringVar(value="png")
+        ttk.Label(quality, text="Image format:").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(
+            quality,
+            textvariable=self.format_var,
+            values=["png", "jpg"],
+            state="readonly",
+            width=10,
+        ).grid(row=1, column=0, sticky="w")
+        ttk.Label(quality, text="png = lossless, jpg = smaller files").grid(row=2, column=0, sticky="w", pady=(2, 0))
+
+        dpi_row = ttk.Frame(quality)
+        dpi_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        ttk.Label(dpi_row, text="Render DPI:").grid(row=0, column=0, sticky="w")
+        self.dpi_var = tk.StringVar(value="300")
+        ttk.Entry(dpi_row, textvariable=self.dpi_var, width=8).grid(row=0, column=1, sticky="w", padx=(6, 0))
+        ttk.Label(dpi_row, text="(300 recommended, 600 for extra sharp)").grid(row=0, column=2, sticky="w", padx=(6, 0))
+
+        jpg_row = ttk.Frame(quality)
+        jpg_row.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(jpg_row, text="JPEG quality:").grid(row=0, column=0, sticky="w")
+        self.jpeg_quality_var = tk.StringVar(value="95")
+        ttk.Entry(jpg_row, textvariable=self.jpeg_quality_var, width=8).grid(row=0, column=1, sticky="w", padx=(6, 0))
+        ttk.Label(jpg_row, text="(only used for jpg)").grid(row=0, column=2, sticky="w", padx=(6, 0))
+
+        bottom = ttk.Frame(container)
+        bottom.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        bottom.columnconfigure(0, weight=1)
+        bottom.columnconfigure(1, weight=0)
+
+        self.status_var = tk.StringVar(value="Ready.")
+        ttk.Label(bottom, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
+        self.progress = ttk.Progressbar(bottom, mode="determinate", length=240)
+        self.progress.grid(row=0, column=1, sticky="e", padx=(10, 0))
+
+        action = ttk.Frame(container)
+        action.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        action.columnconfigure(0, weight=1)
+        action.columnconfigure(1, weight=0)
+        action.columnconfigure(2, weight=0)
+
+        self.convert_button = ttk.Button(action, text="Convert", command=self.start_convert)
+        self.convert_button.grid(row=0, column=1, sticky="e", padx=(0, 6))
+        self.cancel_button = ttk.Button(action, text="Cancel", command=self.request_cancel)
+        self.cancel_button.grid(row=0, column=2, sticky="e")
+
+    def _set_idle_state(self) -> None:
+        self.cancel_button.state(["disabled"])
+        self.progress["value"] = 0
+        self.progress["maximum"] = 1
+        self._update_summary()
+
+    def _set_busy_state(self) -> None:
+        self.cancel_button.state(["!disabled"])
+
+    def _update_summary(self) -> None:
+        if not self._pdfs:
+            self.summary_label.configure(text="No files selected.")
+            self.convert_button.state(["disabled"])
+            return
+        total_bytes = 0
+        for path in self._pdfs:
+            try:
+                total_bytes += path.stat().st_size
+            except Exception:
+                pass
+        self.summary_label.configure(text=f"{len(self._pdfs)} file(s) • {_format_bytes(total_bytes)}")
+        self.convert_button.state(["!disabled"])
+        if not self.output_folder_var.get().strip():
+            self.output_folder_var.set(str(self._pdfs[0].parent))
+
+    def _refresh_listbox(self) -> None:
+        self.listbox.delete(0, tk.END)
+        for p in self._pdfs:
+            self.listbox.insert(tk.END, str(p))
+        self._update_summary()
+
+    def add_pdfs(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Select PDF(s)",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*")],
+            parent=self.window,
+        )
+        if not paths:
+            self._bring_to_front()
+            return
+        new_paths: List[Path] = []
+        for p in paths:
+            path = Path(p)
+            if path.suffix.lower() != ".pdf":
+                continue
+            if path not in self._pdfs and path.exists():
+                new_paths.append(path)
+        if not new_paths:
+            return
+        self._pdfs.extend(new_paths)
+        self._refresh_listbox()
+        self._bring_to_front()
+
+    def remove_selected(self) -> None:
+        indices = list(self.listbox.curselection())
+        if not indices:
+            return
+        for idx in sorted(indices, reverse=True):
+            if 0 <= idx < len(self._pdfs):
+                del self._pdfs[idx]
+        self._refresh_listbox()
+
+    def clear_all(self) -> None:
+        self._pdfs.clear()
+        self._refresh_listbox()
+
+    def browse_output_folder(self) -> None:
+        initial = self.output_folder_var.get().strip() or str(Path.home())
+        chosen = filedialog.askdirectory(title="Choose output folder", initialdir=initial, parent=self.window)
+        if chosen:
+            self.output_folder_var.set(chosen)
+        self._bring_to_front()
+
+    def open_output_folder(self) -> None:
+        folder = self.output_folder_var.get().strip()
+        if not folder:
+            return
+        p = Path(folder)
+        if not p.exists():
+            return
+        try:
+            os.startfile(str(p))
+        except Exception:
+            pass
+
+    def _validate_before_convert(self) -> Optional[Tuple[List[Path], Path, str, int, int]]:
+        if fitz is None:
+            messagebox.showwarning(
+                "PDF engine not installed",
+                "To convert PDF pages to photos, install 'PyMuPDF'.\n\nRun: pip install -r requirements.txt",
+            )
+            return None
+        if not self._pdfs:
+            messagebox.showwarning("No files", "Please add at least one PDF.")
+            return None
+
+        out_folder_raw = self.output_folder_var.get().strip()
+        if not out_folder_raw:
+            messagebox.showwarning("Output missing", "Please choose an output folder.")
+            return None
+        out_folder = Path(out_folder_raw)
+        out_folder.mkdir(parents=True, exist_ok=True)
+
+        fmt = self.format_var.get().strip().lower()
+        if fmt not in {"png", "jpg"}:
+            messagebox.showwarning("Invalid setting", "Invalid image format.")
+            return None
+
+        dpi = max(36, _safe_int(self.dpi_var.get().strip(), 300))
+        jpeg_quality = min(100, max(1, _safe_int(self.jpeg_quality_var.get().strip(), 95)))
+        return (list(self._pdfs), out_folder, fmt, dpi, jpeg_quality)
+
+    def start_convert(self) -> None:
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
+        validated = self._validate_before_convert()
+        if validated is None:
+            return
+        pdfs, out_folder, fmt, dpi, jpeg_quality = validated
+
+        self._stop_requested = False
+        self._set_busy_state()
+        self.status_var.set("Converting…")
+        self.progress["maximum"] = 1
+        self.progress["value"] = 0
+
+        self._worker_thread = threading.Thread(
+            target=self._convert_worker,
+            args=(pdfs, out_folder, fmt, dpi, jpeg_quality),
+            daemon=True,
+        )
+        self._worker_thread.start()
+
+    def request_cancel(self) -> None:
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._stop_requested = True
+            self.status_var.set("Cancel requested…")
+
+    def _poll_events(self) -> None:
+        try:
+            while True:
+                event = self._events.get_nowait()
+                kind = event[0]
+                if kind == "progress":
+                    current, total, msg = event[1], event[2], event[3]
+                    self.progress["maximum"] = max(1, total)
+                    self.progress["value"] = current
+                    self.status_var.set(msg)
+                elif kind == "done":
+                    written = int(event[1])
+                    self._set_idle_state()
+                    self.status_var.set(f"Done. Saved {written} image(s).")
+                    messagebox.showinfo("Done", f"Saved {written} image(s).")
+                elif kind == "cancelled":
+                    self._set_idle_state()
+                    self.status_var.set("Cancelled.")
+                    messagebox.showinfo("Cancelled", "Conversion cancelled.")
+                elif kind == "error":
+                    self._set_idle_state()
+                    self.status_var.set("Error.")
+                    messagebox.showerror("Error", str(event[1]))
+        except queue.Empty:
+            pass
+        self.window.after(100, self._poll_events)
+
+    def _convert_worker(self, pdfs: List[Path], out_folder: Path, fmt: str, dpi: int, jpeg_quality: int) -> None:
+        try:
+            assert fitz is not None
+            total_pages = 0
+            for pdf_path in pdfs:
+                if self._stop_requested:
+                    raise _Cancelled()
+                with fitz.open(str(pdf_path)) as doc:
+                    total_pages += int(doc.page_count)
+
+            if total_pages <= 0:
+                self._events.put(("done", 0))
+                return
+
+            current_page = 0
+            written = 0
+            zoom = float(dpi) / 72.0
+            matrix = fitz.Matrix(zoom, zoom)
+
+            for pdf_path in pdfs:
+                if self._stop_requested:
+                    raise _Cancelled()
+                with fitz.open(str(pdf_path)) as doc:
+                    base = pdf_path.stem
+                    page_count = int(doc.page_count)
+                    for page_number in range(page_count):
+                        if self._stop_requested:
+                            raise _Cancelled()
+
+                        current_page += 1
+                        self._events.put(
+                            (
+                                "progress",
+                                current_page - 1,
+                                total_pages,
+                                f"Rendering {current_page}/{total_pages}: {pdf_path.name} (page {page_number + 1}/{page_count})",
+                            )
+                        )
+
+                        page = doc.load_page(page_number)
+                        pix = page.get_pixmap(matrix=matrix, alpha=False)
+
+                        out_name = f"{base}_page_{page_number + 1:03d}.{fmt}"
+                        out_path = out_folder / out_name
+
+                        if fmt == "png":
+                            pix.save(str(out_path))
+                        else:
+                            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                            img.save(
+                                str(out_path),
+                                format="JPEG",
+                                quality=jpeg_quality,
+                                subsampling=0,
+                                optimize=True,
+                            )
+                        written += 1
+
+            self._events.put(("progress", total_pages, total_pages, "Finalizing…"))
+            self._events.put(("done", written))
+        except _Cancelled:
+            self._events.put(("cancelled",))
+        except Exception as exc:
+            self._events.put(("error", exc))
 
 
 class _Cancelled(Exception):
