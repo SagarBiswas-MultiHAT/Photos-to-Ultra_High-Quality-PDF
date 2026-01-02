@@ -25,29 +25,9 @@ It tries to keep your photos looking as good as possible.
   - `requirements.txt`
   - zipped `venv.rar` file)
 
-## How to run it (2 ways)
+## How to run it
 
-### Way A (recommended): Run with the `.venv` which is zipped into the venv.rar file
-
-STEP 1: unzip the venv.rar then place the `.venv` in the project folder.
-
-Now, your project has a `.venv` folder inside it, do this:
-
-1. Open PowerShell in the project folder
-
-2. Activate the virtual environment:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-3. Start the app:
-
-```powershell
-python -u "Photo Converter to PDF.py"
-```
-
-### Way B: Install the libraries and run
+### Install the libraries and run
 
 If you do NOT have `.venv` (or it doesn’t work), do this:
 
