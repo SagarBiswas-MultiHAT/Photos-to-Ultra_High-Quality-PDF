@@ -1,4 +1,6 @@
-# Ultra-High Quality Converter; Photo(s) to PDF(s) && PDF(s) to Photo(s)
+# Ultra-High Quality Converter 
+
+## Photo/s to PDF/s && PDF/s to Photo/s
 
 This is a simple Windows desktop app that turns your photo(s) into a PDF(s) and PDF(s) into a photo(s).
 
